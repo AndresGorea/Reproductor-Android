@@ -1,132 +1,142 @@
-# arrmux — YAMS sin Docker para PRoot Ubuntu ARM64
+# arrmux — clon nativo de YAMS para PRoot Ubuntu ARM64
 
-Equivalente a [YAMS](https://github.com/rogsme/yams) (Jellyfin + qBittorrent + Sonarr + Radarr + Prowlarr + Bazarr + VPN)
-pero **sin Docker**, pensado para correr dentro de **PRoot Ubuntu ARM64** en un Galaxy S23 (Snapdragon 8 Gen 2) bajo Termux.
+Stack *arr completo **sin Docker, sin systemd y sin TUN**: `supervisord` como
+gestor de procesos y `wireproxy` (userspace) como "VPN" SOCKS5 en
+`127.0.0.1:1080`. Pensado para correr dentro de `proot-distro` Ubuntu 22.04
+(aarch64) en Android.
 
-- Sin Docker/Podman, sin systemd → **supervisord + supervisorctl**.
-- Sin TUN/TAP/iptables (imposibles en PRoot sin root) → **wireproxy** (userspace WireGuard) expone **SOCKS5 127.0.0.1:1080** y qBittorrent rutea el 100% por ahí.
-- SQLite/binarios/config en FS interno PRoot (`/opt/arrmux`, `/etc/arrmux`, `/var/lib/arrmux/<svc>`, `/var/log/arrmux/`). **Solo los medios** viven en almacenamiento Android (`/storage/emulated/0/Media/{movies,tv,downloads}` o `/srv/media` como symlink).
+## Qué es
 
-## Diferencias vs YAMS
+Un instalador + CLI que descarga y supervisa:
 
-| YAMS (original) | arrmux (este proyecto) | Por qué |
-|---|---|---|
-| Docker + docker-compose | Binarios nativos linux-arm64 gestionados por supervisord | No hay Docker en PRoot/Termux |
-| Gluetun (VPN, necesita TUN + iptables) | wireproxy SOCKS5 `127.0.0.1:1080` (userspace WireGuard) | PRoot no expone `/dev/net/tun` ni permite iptables |
-| systemd (`systemctl`) | `supervisord` + `supervisorctl -c /etc/arrmux/supervisor.conf` | Sin PID 1 systemd en PRoot |
-| Volúmenes Docker | `/var/lib/arrmux/<svc>` (datos), `/srv/media` → Android (solo medios) | FUSE de Android corrompe SQLite/sockets |
-| `yams` CLI (docker) | `arrmux` CLI (supervisorctl + curl) | Mismos verbos: start/stop/restart/status/logs/vpn-check |
+| Servicio   | Puerto | URL                    |
+|------------|--------|------------------------|
+| Jellyfin   | 8096   | http://127.0.0.1:8096  |
+| qBittorrent| 8081   | http://127.0.0.1:8081  |
+| Sonarr     | 8989   | http://127.0.0.1:8989  |
+| Radarr     | 7878   | http://127.0.0.1:7878  |
+| Prowlarr   | 9696   | http://127.0.0.1:9696  |
+| Bazarr     | 6767   | http://127.0.0.1:6767  |
+| wireproxy  | 1080   | socks5://127.0.0.1:1080|
 
-## Requisitos (dentro del PRoot Ubuntu)
+## Diferencias vs YAMS (rogsme/yams)
+
+YAMS orquesta contenedores Docker (Gluetun crea una interfaz TUN real y enruta
+todo el tráfico del stack por la VPN con kill-switch a nivel de red).
+Eso es imposible en PRoot (sin root real, sin TUN/TAP, sin iptables), así que:
+
+- **Sin Gluetun/Docker** → `wireproxy` en userspace: solo expone un SOCKS5
+  local. Solo el tráfico que *explícitamente* uses ese proxy va por la VPN
+  (qBittorrent se configura para ello; los *arrindexers salen por red directa
+  salvo que los configures con proxy).
+- **Sin systemd** → `supervisord` (funciona sin PID 1, perfecto en PRoot).
+- **Sin TUN** → no hay interfaz de red virtual ni enrutado a nivel de sistema.
+- **Binarios nativos ARM64** en `/opt/arrmux/apps` (o `~/.arrmux/opt` sin
+  root), datos en `/var/lib/arrmux` (o `~/.arrmux/data`).
+
+## Requisitos
+
+- Ubuntu 22.04 en `proot-distro`, arquitectura `aarch64` (`uname -m`).
+- `apt install -y curl tar python3 python3-venv git supervisor qbittorrent-nox libicu70 sqlite3 libssl3 ca-certificates`
+- qBittorrent viene de apt (`qbittorrent-nox`); el resto se descarga solo.
+
+## Instalación paso a paso
 
 ```bash
-apt update && apt install -y curl tar git python3 python3-venv supervisor qbittorrent-nox
+git clone <este-repo> && cd reproductor
+chmod +x install.sh bin/arrmux scripts/*.sh
+./install.sh
+# o con rutas no-root automáticas si no hay permiso en /opt:
+#   ARRMUX_ROOT=~/.arrmux/opt DATA_ROOT=~/.arrmux/data
 ```
 
-- Ubuntu 22.04+ aarch64 bajo `proot-distro` o Termux PRoot.
-- `uname -m` debe dar `aarch64` (en x86_64 solo desarrollo: los scripts avisan pero continúan).
-- ~2 GB libres (Bazarr venv + Servarr + Jellyfin).
-- ffmpeg opcional para Jellyfin (transcoding solo software, ver límites).
-
-## Quickstart
+1. `install.sh` detecta arquitectura, comprueba dependencias, crea
+   `/opt/arrmux` y `/var/lib/arrmux` (o fallback a `$HOME/.arrmux`),
+   ejecuta los `scripts/`, instala las configs y el CLI.
+2. **Configura WireGuard**: edita `/etc/arrmux/wireproxy.conf`
+   (o `$HOME/.arrmux/etc/wireproxy.conf`) con tus datos `[Interface]` /
+   `[Peer]` reales (el instalador deja una plantilla con `<...>`).
+3. Arranca:
 
 ```bash
-git clone <este-repo> /opt/arrmux-src && cd /opt/arrmux-src
-chmod +x install.sh scripts/*.sh bin/arrmux
-sudo ./install.sh
-# 1. Edita /etc/arrmux/wireproxy.conf con tu .conf WireGuard (ver abajo)
-sudo arrmux start all
-sudo arrmux status
-sudo arrmux vpn-check
+arrmux start wireproxy
+arrmux vpn-check        # la IP vía SOCKS5 debe diferir de la directa
+arrmux start all
+arrmux status
 ```
 
-Re-ejecutar `./install.sh` = **update/repair**: re-descarga Servarr/wireproxy, reinstala configs supervisor y CLI, **sin borrar** `/var/lib/arrmux`.
+## Configuración WireGuard (wireproxy)
 
-## Configuración VPN paso a paso (Mullvad / ProtonVPN)
+Pide a tu proveedor un perfil WireGuard y traslada los campos a
+`wireproxy.conf`:
 
-1. Consigue un `.conf` WireGuard:
-   - **Mullvad**: https://mullvad.net → WireGuard configuration → genera clave → descarga `.conf`.
-   - **ProtonVPN**: cuenta → Downloads → WireGuard configuration.
-2. Copia los valores a `/etc/arrmux/wireproxy.conf`:
-   ```ini
-   [Interface]
-   PrivateKey = <tu PrivateKey>
-   Address = 10.x.x.x/32
-   DNS = 1.1.1.1
-   [Peer]
-   PublicKey = <PublicKey del servidor>
-   Endpoint = <servidor>.mullvad.net:51820
-   AllowedIPs = 0.0.0.0/0
-   PersistentKeepalive = 25
-   [Socks5]
-   BindAddress = 127.0.0.1:1080
-   ```
-3. `arrmux restart wireproxy && arrmux vpn-check` → debe decir **OK** con IPs distintas.
-4. qBittorrent: `setup_wireproxy.sh` ya intenta fijar SOCKS5 en `qBittorrent.conf`. Si no aplicó: WebUI → Preferences → Connection → Proxy **SOCKS5 127.0.0.1:1080** + marcar *Use proxy for peer connections* y *hostname lookup*.
-5. `arrmux restart qbittorrent`.
+```ini
+[Interface]
+PrivateKey = ...
+Address = 10.x.x.x/32
+DNS = 1.1.1.1
 
-## Puertos / URLs
+[Peer]
+PublicKey = ...
+AllowedIPs = 0.0.0.0/0
+Endpoint = host:puerto
+PersistentKeepalive = 25
 
-| Servicio | Puerto | URL |
-|---|---|---|
-| Jellyfin | 8096 | http://\<IP-PRoot\>:8096 |
-| qBittorrent | 8081 | http://\<IP-PRoot\>:8081 |
-| Sonarr | 8989 | http://\<IP-PRoot\>:8989 |
-| Radarr | 7878 | http://\<IP-PRoot\>:7878 |
-| Prowlarr | 9696 | http://\<IP-PRoot\>:9696 |
-| Bazarr | 6767 | http://\<IP-PRoot\>:6767 |
-| wireproxy | 1080 | socks5h://127.0.0.1:1080 |
-
-`install.sh` imprime esta tabla con la IP detectada al final.
-
-## Comandos `arrmux`
-
-```
-arrmux install            # re-ejecuta ../install.sh
-arrmux start [all|svc]    # supervisord -c ... si no corre + supervisorctl start
-arrmux stop [all|svc]
-arrmux restart [all|svc]
-arrmux status             # tabla SERVICIO|ESTADO|PID|MEM|URL
-arrmux logs <svc>         # tail -f /var/log/arrmux/<svc>.log
-arrmux vpn-check          # IP directa vs IP vía SOCKS5; OK si difieren
-arrmux --help
+[Socks5]
+BindAddress = 127.0.0.1:1080
 ```
 
-## Layout en disco
+Luego `arrmux restart wireproxy && arrmux vpn-check`.
 
-```
-/opt/arrmux/{sonarr,radarr,prowlarr,bazarr,bazarr-venv,bin/wireproxy}
-/etc/arrmux/{supervisor.conf,services/*.conf,wireproxy.conf,jellyfin/}
-/var/lib/arrmux/<servicio>/     # DBs y estado (FS interno, nunca FUSE)
-/var/log/arrmux/*.log
-/srv/media -> /storage/emulated/0/Media/{movies,tv,downloads}  # solo medios
+## Uso del CLI
+
+```bash
+arrmux install | start [all|SVC] | stop [all|SVC] | restart [all|SVC]
+arrmux status                 # tabla RUNNING/STOPPED PID MEM URL
+arrmux logs [SVC]             # tail -f de /var/log/arrmux/*.log
+arrmux vpn-check              # IP directa vs IP vía SOCKS5
 ```
 
 ## Solución de problemas
 
-- **FUSE + SQLite**: nunca pongas `*.db`, sockets o `config.xml` bajo `/storage` o `/sdcard`. Síntoma: `database is locked / disk I/O error`. Fix: datos en `/var/lib/arrmux`, solo medios en Android.
-- **TUN ausente** (`/dev/net/tun: No such device`): esperado en PRoot. Por eso existe wireproxy; no intentes Gluetun/OpenVPN-TUN.
-- **OOM en Snapdragon**: baja límites de Bazarr/Sonarr, desactiva transcoding HW en Jellyfin, usa `autorestart=true` (ya configurado) y vigila con `arrmux status` (columna MEM).
-- **Autostart**: sin systemd. Opciones: app **Termux:Boot** (`~/.termux/boot/start-arrmux.sh` con `proot-distro login ubuntu -- arrmux start all`) o `proot-distro login` + `@reboot`-like vía script manual. Ejemplo Termux:Boot:
-  ```sh
-  #!/data/data/com.termux/files/usr/bin/sh
-  proot-distro login ubuntu -- /usr/local/bin/arrmux start all
-  ```
-- **ffmpeg / transcoding**: `apt install jellyfin-ffmpeg` si existe para tu release; si no, ffmpeg genérico. Solo software (sin HW OMX/MediaCodec en PRoot) → prefiere **Direct Play**.
+- `supervisord no responde` → mira `$LOG_DIR/supervisord.log`; el socket vive
+  en `$DATA_ROOT/supervisor.sock` (nunca en `/sdcard`).
+- `vpn-check` dice que wireproxy no responde → revisa `logs wireproxy`;
+  casi siempre es `wireproxy.conf` sin editar (plantilla con `<...>`).
+- Sonarr/Radarr no arrancan → falta `libicu` (instala `libicu70`) o el
+  tarball se descargó mal (borra `/opt/arrmux/apps/<svc>` y re-ejecuta).
+- qBittorrent descarga con tu IP real → `arrmux stop qbittorrent`,
+  re-ejecuta `install.sh` (regenera el proxy forzado) y arranca de nuevo.
+  Verifica siempre con `vpn-check` antes de descargar.
+- `ERROR ... bajo /sdcard` → mueve `DATA_ROOT` a almacenamiento interno.
 
-## Viabilidad (honesto)
+## ⚠️ VIABILIDAD HONESTA (léeme)
 
-| Componente | Estado | Nota |
-|---|---|---|
-| Jellyfin APT (repo.jellyfin.org/debian) | ✅ viable | Repo oficial con arm64; fallback a tarball documentado en `install.sh` |
-| qbittorrent-nox apt | ✅ viable | Disponible en Ubuntu arm64; WebUI :8081 |
-| Sonarr/Radarr/Prowlarr tarballs `linux-core-arm64` | ✅ viables | `.NET` embebido, sin dependencias; `--data` por servicio |
-| Bazarr git + venv | ⚠️ viable pero lento | `pip install -r requirements.txt` tarda varios minutos en el teléfono la primera vez |
-| wireproxy userspace | ✅ viable | Sin TUN/iptables; SOCKS5 :1080 verificado con `vpn-check` |
-| Transcoding HW | ❌ no | Sin acceso GPU/MediaCodec desde PRoot → solo software/Direct Play |
-| Port-forward VPN / seeding entrante | ❌ sin root | Solo conexiones salientes por SOCKS5; ratio limitado |
-| Batería/temperatura | ⚠️ | Carga sostenida drena y calienta; úsalo con cargador y límites |
+Sin interfaz TUN real **no hay kill-switch de verdad**: si wireproxy se cae,
+qBittorrent *intentará* seguir usando un proxy muerto (falla cerrado en la
+práctica con `ProxyPeerConnections=true`, pero no es una garantía a nivel de
+firewall como en Gluetun; verifícalo tú mismo parando wireproxy y observando).
 
-## Límites conocidos
+- **SOCKS5 ≠ cifrado total**: solo el tráfico TCP configurado pasa por el
+  túnel; el resto de la máquina sale directo.
+- **DHT/UDP limitado**: el tráfico UDP (DHT, PeX, uTP) no atraviesa SOCKS5;
+  por eso este proyecto lo **desactiva** (`DHT/PeX/LSD=false`, `BTProtocol=TCP`).
+  Menos fuentes = descargas potencialmente más lentas.
+- **Transcode por software lento**: sin aceleración HW en PRoot, Jellyfin
+  transcodificando 4K puede ir a tirones; prefiere direct-play.
+- **Doze/batería mata procesos**: Android puede suspender o matar PRoot en
+  segundo plano; excluye Termux del ahorro de batería y acepta cortes.
+- **FUSE corrompe sqlite**: nunca pongas configs/DBs en `/sdcard`
+  (el instalador aborta si lo intentas); solo `media/` vive ahí.
+- **Sin port-forward**: la mayoría de VPN no redirigen puertos vía WireGuard
+  genérico; cuenta con ratio de subida pobre (sin conexiones entrantes).
+- **.NET necesita libicu**: sin `libicu70`, Sonarr/Radarr/Prowlarr mueren al
+  arrancar con errores de globalización.
 
-Sin Docker, sin systemd, sin TUN/TAP/iptables. Sin transcoding por hardware. Sin port-forward de la VPN (sin root no hay NAT). La batería del S23 sufre con indexados largos: programa scans de noche.
+## Estructura
+
+```text
+install.sh  bin/arrmux  config/supervisor.conf  config/services/*.conf
+scripts/install_arr.sh  scripts/setup_wireproxy.sh
+scripts/setup_storage.sh  scripts/setup_qbittorrent.sh
+```
