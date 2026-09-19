@@ -13,7 +13,15 @@ log()  { echo "[install] $*"; }
 warn() { echo "[install] ADVERTENCIA: $*" >&2; }
 die()  { echo "[install] ERROR: $*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "Ejecuta como root (o sudo): necesita escribir en /opt /etc /var y apt."
+[ "$(id -u)" -eq 0 ] || {
+  ARRMUX_ROOT="$HOME/.arrmux/opt"; ARRMUX_ETC="$HOME/.arrmux/etc"
+  ARRMUX_DATA="$HOME/.arrmux/data"; ARRMUX_LOG="$HOME/.arrmux/log"
+  SERVICES_DIR="${ARRMUX_ETC}/services"
+  warn "Sin root: usando fallback \$HOME/.arrmux (ROOT=${ARRMUX_ROOT} ETC=${ARRMUX_ETC})."
+}
+# --force / ARRMUX_FORCE=1: permite tests en arch != aarch64 (se propaga a sub-scripts).
+if [[ "${1:-}" == "--force" ]]; then export ARRMUX_FORCE=1; fi
+IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 
 # --- 1. Dependencias ---
 log "Comprobando dependencias: curl tar python3-venv supervisor..."
@@ -41,16 +49,22 @@ mkdir -p "${ARRMUX_ROOT}/bin" "${ARRMUX_ETC}" "${SERVICES_DIR}" \
          "${ARRMUX_DATA}" "${ARRMUX_LOG}" \
          "${ARRMUX_ETC}/jellyfin" "${ARRMUX_DATA}/jellyfin/data"
 
-# --- 3. Sub-instaladores ---
+# --- 3. Sub-instaladores (con rutas exportadas; nunca borran DATA) ---
+export ARRMUX_ROOT ARRMUX_DATA ARRMUX_LOG
+export DATA_ROOT="$ARRMUX_DATA" LOG_DIR="$ARRMUX_LOG" CONF_DIR="$ARRMUX_ETC"
 log "== storage =="
 bash "${SCRIPT_DIR}/scripts/setup_storage.sh"
 log "== Servarr + Bazarr =="
-bash "${SCRIPT_DIR}/scripts/install_arr.sh"
+bash "${SCRIPT_DIR}/scripts/install_arr.sh" ${ARRMUX_FORCE:+--force}
 log "== wireproxy =="
-bash "${SCRIPT_DIR}/scripts/setup_wireproxy.sh"
+bash "${SCRIPT_DIR}/scripts/setup_wireproxy.sh" ${ARRMUX_FORCE:+--force}
+log "== qbittorrent (proxy forzado) =="
+bash "${SCRIPT_DIR}/scripts/setup_qbittorrent.sh"
 
-# --- 4. Jellyfin: repo APT, fallback tarball ---
-if command -v jellyfin >/dev/null 2>&1 || [ -x /usr/bin/jellyfin ]; then
+# --- 4. Jellyfin: repo APT, fallback tarball (solo con root; sin root se omite) ---
+if [ "$IS_ROOT" -eq 0 ]; then
+  warn "Sin root: se omite APT de Jellyfin (usa el tarball portable de install_arr.sh en PRoot)."
+elif command -v jellyfin >/dev/null 2>&1 || [ -x /usr/bin/jellyfin ]; then
   log "Jellyfin ya instalado: $(jellyfin --version 2>&1 | head -n1 || true)"
 else
   log "Instalando Jellyfin (repo APT https://repo.jellyfin.org/debian)..."
@@ -73,8 +87,10 @@ else
   fi
 fi
 
-# --- 5. qBittorrent-nox vía apt ---
-if ! command -v qbittorrent-nox >/dev/null 2>&1; then
+# --- 5. qBittorrent-nox vía apt (solo con root; sin root se omite) ---
+if [ "$IS_ROOT" -eq 0 ]; then
+  warn "Sin root: se omite apt de qbittorrent-nox."
+elif ! command -v qbittorrent-nox >/dev/null 2>&1; then
   log "Instalando qbittorrent-nox vía apt..."
   apt-get update -o Acquire::Retries=2 && apt-get install -y qbittorrent-nox || \
     die "No se pudo instalar qbittorrent-nox. Ejecuta: apt install -y qbittorrent-nox"
@@ -91,21 +107,31 @@ render() { # $1=origen $2=destino: sustituye @@ARRMUX_ROOT@@ @@ARRMUX_ETC@@ @@AR
   if grep -q "@@" "$2"; then
     die "Quedaron placeholders @@...@@ sin sustituir en $2. Revisa config/$(basename "$1")."
   fi
+  # Sin root (PRoot sin sudo / tests): supervisord no puede hacer setuid → anula user=.
+  if [ "$IS_ROOT" -eq 0 ]; then
+    sed -i -E 's/^(user=)/; \1/' "$2"
+  fi
 }
 render "${SCRIPT_DIR}/config/supervisor.conf" "${ARRMUX_ETC}/supervisor.conf"
 for svc_conf in "${SCRIPT_DIR}"/config/services/*.conf; do
   render "$svc_conf" "${SERVICES_DIR}/$(basename "$svc_conf")"
 done
-# Compat: algunos tutoriales miran /etc/supervisor/conf.d/
-if [ -d /etc/supervisor/conf.d ]; then
+# Compat: algunos tutoriales miran /etc/supervisor/conf.d/ (solo root).
+if [ "$IS_ROOT" -eq 1 ] && [ -d /etc/supervisor/conf.d ]; then
   printf '[include]\nfiles=%s/*.conf\n' "${SERVICES_DIR}" > /etc/supervisor/conf.d/arrmux.conf
   log "Include registrado en /etc/supervisor/conf.d/arrmux.conf"
 fi
 chmod 644 "${ARRMUX_ETC}/supervisor.conf" "${SERVICES_DIR}"/*.conf
 
-# --- 7. CLI arrmux ---
-log "Instalando CLI en /usr/local/bin/arrmux..."
-install -m 0755 "${SCRIPT_DIR}/bin/arrmux" /usr/local/bin/arrmux
+# --- 7. CLI arrmux (fallback ~/.local/bin sin root) ---
+if [ "$IS_ROOT" -eq 1 ]; then
+  log "Instalando CLI en /usr/local/bin/arrmux..."
+  install -m 0755 "${SCRIPT_DIR}/bin/arrmux" /usr/local/bin/arrmux
+else
+  mkdir -p "$HOME/.local/bin"
+  log "Instalando CLI en \$HOME/.local/bin/arrmux..."
+  install -m 0755 "${SCRIPT_DIR}/bin/arrmux" "$HOME/.local/bin/arrmux"
+fi
 
 # --- 8. Permisos (datos preservados, nunca rm -rf de DATA) ---
 log "Ajustando permisos (sin borrar datos)..."

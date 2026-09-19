@@ -6,11 +6,19 @@ set -euo pipefail
 : "${ARRMUX_ROOT:=/opt/arrmux}"
 : "${DATA_ROOT:=/var/lib/arrmux}"
 
+# --- Guardia de arquitectura: los binarios son linux-arm64 (PRoot).
+# En este host solo avisa; permite --force / ARRMUX_FORCE=1 para tests locales.
+FORCE=0
+[[ "${1:-}" == "--force" || "${ARRMUX_FORCE:-0}" == "1" ]] && FORCE=1
 ARCH="$(uname -m)"
 case "${ARCH}" in
   aarch64|arm64) echo "Arquitectura ${ARCH} (ARM64) — objetivo soportado." ;;
-  *) echo "ADVERTENCIA: arquitectura ${ARCH}; se esperaba aarch64 (Snapdragon 8 Gen 2)." >&2
-     echo "Se continúa igualmente (útil en x86_64 para desarrollo)." >&2 ;;
+  *)
+    echo "ERROR: arquitectura ${ARCH}; arrmux solo es viable en PRoot aarch64 (binarios linux-arm64)." >&2
+    echo "Solo avisa en PRoot: permite --force para test en este host (o ARRMUX_FORCE=1)." >&2
+    [[ "$FORCE" == "1" ]] || exit 1
+    echo "AVISO (--force): se continúa en ${ARCH} solo para pruebas. NO descargues tarballs ARM64 aquí." >&2
+    ;;
 esac
 
 # Dependencias de runtime típicas en Ubuntu 22.04 (aviso, no instalación forzada).

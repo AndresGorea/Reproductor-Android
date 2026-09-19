@@ -88,8 +88,8 @@ cmd_status() {
   while IFS= read -r line; do
     svc="$(awk '{print $1}' <<<"$line")"
     state="$(awk '{print $2}' <<<"$line")"
-    pid="$(grep -oP 'pid \K[0-9]+' <<<"$line" || echo "-")"
-    [[ "$pid" == "" ]] && pid="-"
+    pid="$(sed -n 's/.*pid \([0-9][0-9]*\).*/\1/p' <<<"$line")"
+    [[ -z "${pid:-}" ]] && pid="-"
     local mem="-" url="-"
     if [[ "$pid" != "-" ]]; then
       mem="$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.0fM", $1/1024}' || echo "-")"
@@ -109,8 +109,12 @@ cmd_logs() {
     valid_svc "$t"
     tail -f "$LOG_DIR/$t.log"
   else
-    echo -e "${BLUE}Logs en $LOG_DIR:${NC}"; ls -1 "$LOG_DIR"/*.log 2>/dev/null || echo "(sin logs todavía)"
-    tail -f "$LOG_DIR"/*.log
+    echo -e "${BLUE}Logs en $LOG_DIR:${NC}"
+    shopt -s nullglob
+    local files=("$LOG_DIR"/*.log)
+    if [[ ${#files[@]} -eq 0 ]]; then echo "(sin logs todavía)"; return 0; fi
+    ls -1 "${files[@]}"
+    tail -f "${files[@]}"
   fi
 }
 

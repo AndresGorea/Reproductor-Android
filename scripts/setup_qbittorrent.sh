@@ -8,7 +8,8 @@ set -euo pipefail
 CONF_FILE="$DATA_ROOT/qbittorrent/qBittorrent/config/qBittorrent.conf"
 
 # No tocar config con el demonio corriendo (sobreescribiría al salir).
-if pgrep -f "qbittorrent-nox" >/dev/null 2>&1; then
+# pgrep puede no existir en PRoot mínimo: si falta, se asume parado.
+if command -v pgrep >/dev/null 2>&1 && pgrep -f "qbittorrent-nox" >/dev/null 2>&1; then
   echo "ERROR: qbittorrent está corriendo. Páralo primero: arrmux stop qbittorrent" >&2
   exit 1
 fi
@@ -17,13 +18,17 @@ mkdir -p "$(dirname "$CONF_FILE")"
 touch "$CONF_FILE"
 
 # Fija clave=valor dentro de la sección [Preferences], creando la sección si falta.
+# Las claves qBittorrent llevan backslashes: se escapan para regex (grep/sed)
+# y para el reemplazo de sed. Sin esto, re-ejecutar duplicaba claves.
 set_pref() {
   local key="$1" val="$2"
+  local rx="${key//\\/\\\\}"          # regex: \ literal
+  local rep="${rx//&/\\&}"            # reemplazo sed: \ y & literales
   if grep -q "^\[Preferences\]" "$CONF_FILE"; then
-    if grep -q "^$key=" "$CONF_FILE"; then
-      sed -i "s|^$key=.*|$key=$val|" "$CONF_FILE"
+    if grep -q "^${rx}=" "$CONF_FILE"; then
+      sed -i "s|^${rx}=.*|${rep}=$val|" "$CONF_FILE"
     else
-      sed -i "/^\[Preferences\]/a $key=$val" "$CONF_FILE"
+      sed -i "/^\[Preferences\]/a ${rep}=$val" "$CONF_FILE"
     fi
   else
     printf '\n[Preferences]\n%s=%s\n' "$key" "$val" >> "$CONF_FILE"

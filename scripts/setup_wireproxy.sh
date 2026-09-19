@@ -7,28 +7,33 @@ set -euo pipefail
 : "${DATA_ROOT:=/var/lib/arrmux}"
 : "${CONF_DIR:=/etc/arrmux}"
 
-WIREPROXY_REPO="windtf/wireproxy"
-# Se resuelve la última release vía API de GitHub (releases https://github.com/windtf/wireproxy/releases).
+# --- Guardia de arquitectura (binario linux-arm64; PRoot). --force solo para tests. ---
+FORCE=0
+[[ "${1:-}" == "--force" || "${ARRMUX_FORCE:-0}" == "1" ]] && FORCE=1
 ARCH="$(uname -m)"
 case "${ARCH}" in
   aarch64|arm64) ASSET_PAT="linux_arm64.tar.gz" ;;
-  x86_64) echo "ADVERTENCIA: x86_64 detectado (solo desarrollo); se descargará binario amd64." >&2
-          ASSET_PAT="linux_amd64.tar.gz" ;;
-  *) echo "ADVERTENCIA: arquitectura ${ARCH} no reconocida; se intenta linux_arm64." >&2
-     ASSET_PAT="linux_arm64.tar.gz" ;;
+  *)
+    echo "ERROR: arquitectura ${ARCH}; wireproxy debe ser linux_arm64 (PRoot)." >&2
+    echo "Solo avisa en PRoot: permite --force para test en este host (o ARRMUX_FORCE=1)." >&2
+    [[ "$FORCE" == "1" ]] || exit 1
+    echo "AVISO (--force): se continúa en ${ARCH} solo para pruebas (sin descargar)." >&2
+    ASSET_PAT="linux_arm64.tar.gz" ;;
 esac
-echo "wireproxy: resolviendo última release de ${WIREPROXY_REPO}..."
-API_JSON="$(curl -fsSL --retry 3 --max-time 30 "https://api.github.com/repos/${WIREPROXY_REPO}/releases/latest")" \
-  || { echo "ERROR: no se pudo consultar releases de ${WIREPROXY_REPO}. Revisa red/DNS." >&2; exit 1; }
-URL="$(echo "${API_JSON}" | grep -oiE '"browser_download_url": *"[^"]*'"${ASSET_PAT}"'[^"]*"' | head -n1 | cut -d'"' -f4)"
-[[ -n "${URL:-}" ]] || { echo "ERROR: ningún asset coincide con '${ASSET_PAT}'." >&2; exit 1; }
 
-mkdir -p "$ARRMUX_ROOT/bin" "$DATA_ROOT/wireproxy" "$(dirname "$CONF_DIR/wireproxy.conf" 2>/dev/null || echo "$CONF_DIR")"
-mkdir -p "$CONF_DIR"
+mkdir -p "$ARRMUX_ROOT/bin" "$DATA_ROOT/wireproxy" "$CONF_DIR"
 
+# Idempotencia total ANTES de tocar red: si hay binario, se omite descarga.
 if [[ -x "$ARRMUX_ROOT/bin/wireproxy" ]]; then
   echo "wireproxy: ya instalado, se omite descarga."
 else
+  WIREPROXY_REPO="windtf/wireproxy"
+  # Última release vía API de GitHub (solo cuando falta el binario).
+  echo "wireproxy: resolviendo última release de ${WIREPROXY_REPO}..."
+  API_JSON="$(curl -fsSL --retry 3 --max-time 30 "https://api.github.com/repos/${WIREPROXY_REPO}/releases/latest")" \
+    || { echo "ERROR: no se pudo consultar releases de ${WIREPROXY_REPO}. Revisa red/DNS." >&2; exit 1; }
+  URL="$(echo "${API_JSON}" | grep -oiE '"browser_download_url": *"[^"]*'"${ASSET_PAT}"'[^"]*"' | head -n1 | cut -d'"' -f4)"
+  [[ -n "${URL:-}" ]] || { echo "ERROR: ningún asset coincide con '${ASSET_PAT}'." >&2; exit 1; }
   echo "wireproxy: descargando ${URL}..."
   TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
   if ! curl -fSL --retry 3 --max-time 120 -o "$TMP/wireproxy.tar.gz" "$URL"; then

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 : "${DATA_ROOT:=/var/lib/arrmux}"
+: "${HOME:=/tmp}"
 # MEDIA_ROOT configurable. Default: /storage/emulated/0/Media si existe, si no ~/media.
 if [[ -z "${MEDIA_ROOT:-}" ]]; then
   if [[ -d "/storage/emulated/0" ]]; then
@@ -11,6 +12,12 @@ if [[ -z "${MEDIA_ROOT:-}" ]]; then
   else
     MEDIA_ROOT="$HOME/media"
   fi
+fi
+# DRY_RUN=1: solo imprime lo que haría (para tests locales sin tocar disco).
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "[dry-run] DATA_ROOT=$DATA_ROOT MEDIA_ROOT=$MEDIA_ROOT"
+  echo "[dry-run] mkdir -p $MEDIA_ROOT/{movies,tv,downloads}"
+  exit 0
 fi
 export MEDIA_ROOT
 
