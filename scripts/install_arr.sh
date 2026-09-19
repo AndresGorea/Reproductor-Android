@@ -1,108 +1,101 @@
 #!/usr/bin/env bash
-# install_arr.sh — descarga Servarr ARM64 + Bazarr (idempotente, update-safe).
+# arrmux — descarga idempotente de *arr + Jellyfin + Bazarr (linux-arm64).
+# No re-descarga si el binario ya existe. Aborta con diagnóstico si falla curl/tar.
 set -euo pipefail
 
-ARRMUX_ROOT="/opt/arrmux"
-ARRMUX_DATA="/var/lib/arrmux"
-ARRMUX_LOG="/var/log/arrmux"
-TMP_DIR="/tmp/arrmux-dl"
-
-log()  { echo "[install_arr] $*"; }
-warn() { echo "[install_arr] ADVERTENCIA: $*" >&2; }
-die()  { echo "[install_arr] ERROR: $*" >&2; exit 1; }
-
-command -v curl >/dev/null 2>&1 || die "falta 'curl'. Instala con: apt install curl"
-command -v tar >/dev/null 2>&1 || die "falta 'tar'. Instala con: apt install tar"
-command -v python3 >/dev/null 2>&1 || die "falta 'python3'. Instala con: apt install python3"
-command -v git >/dev/null 2>&1 || die "falta 'git'. Instala con: apt install git"
+: "${ARRMUX_ROOT:=/opt/arrmux}"
+: "${DATA_ROOT:=/var/lib/arrmux}"
 
 ARCH="$(uname -m)"
-case "${ARCH}" in
-  aarch64|arm64) log "Arquitectura ${ARCH} (ARM64) — objetivo soportado." ;;
-  x86_64) warn "Arquitectura ${ARCH}: solo para desarrollo. En el teléfono debe ser aarch64 (Snapdragon 8 Gen 2)." ;;
-  *) warn "Arquitectura ${ARCH} no probada; se intenta igualmente con binarios arm64." ;;
-esac
-
-mkdir -p "${ARRMUX_ROOT}" "${TMP_DIR}"
-
-# Descarga la última release de GitHub cuyo asset case-insensitive coincida con $2.
-download_github_latest() {
-  local repo="$1"       # p.ej. Sonarr/Sonarr
-  local pattern="$2"    # p.ej. linux-core-arm64.tar.gz
-  local dest_tar="$3"
-
-  log "Resolviendo última release de ${repo} (patrón: ${pattern})..."
-  local api_url="https://api.github.com/repos/${repo}/releases/latest"
-  local json
-  json="$(curl -fsSL --max-time 30 "${api_url}")" || die "No se pudo consultar ${api_url}. Revisa red/DNS."
-  local url
-  url="$(echo "${json}" | grep -oiE '"browser_download_url": *"[^"]*'"${pattern}"'[^"]*"' | head -n1 | cut -d'"' -f4)"
-  [ -n "${url:-}" ] || die "Ningún asset de ${repo} coincide con '${pattern}'. Respuesta parcial: $(echo "${json}" | head -c 300)"
-  log "Descargando ${url} ..."
-  curl -fSL --max-time 300 -o "${dest_tar}" "${url}" || die "Falló la descarga de ${url}."
-  log "Guardado en ${dest_tar}"
-}
-
-install_servapp() {
-  local repo="$1"    # Sonarr/Sonarr
-  local app="$2"     # sonarr (minúsculas, dir destino)
-  local App="$3"     # Sonarr (nombre binario/carpeta mayúsculas)
-  local pattern="$4" # linux-core-arm64.tar.gz
-
-  local dest_dir="${ARRMUX_ROOT}/${app}"
-  local tarball="${TMP_DIR}/${app}-latest.tar.gz"
-  download_github_latest "${repo}" "${pattern}" "${tarball}"
-  log "Instalando ${App} en ${dest_dir} (datos intactos en ${ARRMUX_DATA}/${app})..."
-  mkdir -p "${dest_dir}" "${ARRMUX_DATA}/${app}"
-  # Extraer a staging y mover: evita mezclar versiones viejas.
-  local stage="${TMP_DIR}/${app}-stage"
-  rm -rf "${stage}"
-  mkdir -p "${stage}"
-  tar -xzf "${tarball}" -C "${stage}" || die "No se pudo extraer ${tarball}."
-  # Los tarballs Servarr contienen una carpeta ${App}/ con el binario dentro.
-  if [ -d "${stage}/${App}" ]; then
-    rm -rf "${dest_dir:?}/"*
-    cp -a "${stage}/${App}/." "${dest_dir}/" || die "No se pudo copiar ${App} a ${dest_dir}."
-  else
-    # Fallback: volcar contenido del stage tal cual.
-    warn "${tarball} no contiene carpeta ${App}/; copiando contenido tal cual."
-    cp -a "${stage}/." "${dest_dir}/" || die "No se pudo copiar ${App} a ${dest_dir}."
-  fi
-  chmod +x "${dest_dir}/${App}" 2>/dev/null || warn "No se pudo dar +x a ${dest_dir}/${App}."
-  rm -rf "${stage}" "${tarball}"
-  log "${App} OK -> ${dest_dir}/${App}"
-}
-
-install_servapp "Sonarr/Sonarr" "sonarr" "Sonarr" "linux-core-arm64.tar.gz"
-install_servapp "Radarr/Radarr" "radarr" "Radarr" "linux-core-arm64.tar.gz"
-install_servapp "Prowlarr/Prowlarr" "prowlarr" "Prowlarr" "linux-core-arm64.tar.gz"
-
-# --- Bazarr: git + venv (lento la primera vez en el teléfono) ---
-BAZARR_DIR="${ARRMUX_ROOT}/bazarr"
-VENV_DIR="${ARRMUX_ROOT}/bazarr-venv"
-if [ -d "${BAZARR_DIR}/.git" ]; then
-  log "Bazarr ya clonado; actualizando (git pull)..."
-  git -C "${BAZARR_DIR}" pull --ff-only || warn "git pull de Bazarr falló; se conserva la copia local."
-else
-  if [ -e "${BAZARR_DIR}" ] && [ ! -d "${BAZARR_DIR}/.git" ]; then
-    warn "${BAZARR_DIR} existe sin .git; se conserva y no se clona."
-  else
-    log "Clonando Bazarr..."
-    git clone --depth 1 https://github.com/morpheus65535/bazarr.git "${BAZARR_DIR}" || \
-      die "No se pudo clonar Bazarr. Revisa red."
-  fi
+if [[ "$ARCH" != "aarch64" && "$ARCH" != "arm64" ]]; then
+  echo "ERROR: se requiere ARM64 (aarch64). Detectado: $ARCH" >&2
+  exit 1
 fi
 
-if [ ! -x "${VENV_DIR}/bin/python" ]; then
-  log "Creando venv en ${VENV_DIR}..."
-  python3 -m venv "${VENV_DIR}" || die "Falló 'python3 -m venv'. Instala con: apt install python3-venv"
-else
-  log "venv ya existe en ${VENV_DIR}; reutilizando."
-fi
-log "Instalando requirements de Bazarr (puede tardar varios minutos en ARM)..."
-"${VENV_DIR}/bin/pip" install --upgrade pip || warn "No se pudo actualizar pip."
-"${VENV_DIR}/bin/pip" install -r "${BAZARR_DIR}/requirements.txt" || \
-  die "Falló pip install de Bazarr. Revisa el log de pip."
-mkdir -p "${ARRMUX_DATA}/bazarr"
+# Dependencias de runtime típicas en Ubuntu 22.04 (aviso, no instalación forzada).
+for lib in libicu sqlite3 libssl3 ca-certificates; do
+  if ! dpkg -s "$lib" >/dev/null 2>&1; then
+    echo "AVISO: paquete '$lib' no instalado. .NET/Jellyfin pueden fallar." >&2
+    echo "       Instala con: apt install -y libicu70 sqlite3 libssl3 ca-certificates" >&2
+  fi
+done
 
-log "OK. Servarr + Bazarr instalados/actualizados sin tocar datos."
+mkdir -p "$ARRMUX_ROOT/apps" "$DATA_ROOT/.dotnet" "$DATA_ROOT"/{sonarr,radarr,prowlarr,jellyfin,bazarr}
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# $1=nombre $2=url $3=subdir_en_apps $4=binario_testigo
+fetch_tarball() {
+  local name="$1" url="$2" subdir="$3" witness="$4"
+  if [[ -x "$ARRMUX_ROOT/apps/$subdir/$witness" ]]; then
+    echo "$name: ya instalado, se omite descarga."
+    return 0
+  fi
+  echo "$name: descargando..."
+  if ! curl -fSL --retry 3 --max-time 300 -o "$TMP/$name.tar.gz" "$url"; then
+    echo "ERROR: falló la descarga de $name desde $url" >&2
+    echo "       Revisa tu conexión (¿wireproxy activo interfiriendo?) y re-ejecuta install.sh." >&2
+    exit 1
+  fi
+  if ! tar -xzf "$TMP/$name.tar.gz" -C "$TMP"; then
+    echo "ERROR: tarball de $name corrupto o no es gzip válido." >&2
+    exit 1
+  fi
+  # El tarball extrae una carpeta única; moverla a apps/<subdir>.
+  local extracted
+  extracted="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  rm -rf "$ARRMUX_ROOT/apps/$subdir"
+  mv "$extracted" "$ARRMUX_ROOT/apps/$subdir"
+  chmod +x "$ARRMUX_ROOT/apps/$subdir/$witness" 2>/dev/null || true
+  echo "$name: instalado en $ARRMUX_ROOT/apps/$subdir"
+}
+
+fetch_tarball "Sonarr" \
+  "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=arm64" \
+  "sonarr" "Sonarr"
+
+fetch_tarball "Radarr" \
+  "https://services.radarr.video/v1/download/main/latest?version=5&os=linux&arch=arm64" \
+  "radarr" "Radarr"
+
+fetch_tarball "Prowlarr" \
+  "https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=arm64" \
+  "prowlarr" "Prowlarr"
+
+# --- Jellyfin portable arm64: se resuelve el último stable desde el índice ---
+if [[ -x "$ARRMUX_ROOT/apps/jellyfin/jellyfin" ]]; then
+  echo "Jellyfin: ya instalado, se omite descarga."
+else
+  echo "Jellyfin: resolviendo última versión estable arm64..."
+  INDEX="$(curl -fSL --retry 3 --max-time 60 https://repo.jellyfin.org/files/server/linux/latest-stable/arm64/)" \
+    || { echo "ERROR: no se pudo listar https://repo.jellyfin.org/files/server/linux/latest-stable/arm64/" >&2; exit 1; }
+  JELLY_TAR="$(grep -oE 'href="jellyfin_[0-9][^"]*linux-arm64\.tar\.gz"' <<<"$INDEX" | head -n1 | cut -d'"' -f2)" \
+    || { echo "ERROR: no se encontró tarball jellyfin_*_linux-arm64.tar.gz en el índice." >&2; exit 1; }
+  [[ -n "$JELLY_TAR" ]] || { echo "ERROR: índice de Jellyfin sin tarball arm64 reconocible." >&2; exit 1; }
+  fetch_tarball "Jellyfin" \
+    "https://repo.jellyfin.org/files/server/linux/latest-stable/arm64/$JELLY_TAR" \
+    "jellyfin" "jellyfin"
+fi
+
+# --- Bazarr: git clone + venv (idempotente) ---
+if [[ -x "$ARRMUX_ROOT/apps/bazarr/bazarr.py" && -x "$ARRMUX_ROOT/bazarr-venv/bin/python" ]]; then
+  echo "Bazarr: ya instalado, se omite."
+else
+  command -v git >/dev/null 2>&1 || { echo "ERROR: falta 'git' (apt install -y git) para clonar Bazarr." >&2; exit 1; }
+  if [[ -d "$ARRMUX_ROOT/apps/bazarr/.git" ]]; then
+    echo "Bazarr: repo existe, actualizando..."
+    git -C "$ARRMUX_ROOT/apps/bazarr" pull --ff-only || echo "AVISO: git pull falló, se conserva copia local."
+  else
+    rm -rf "$ARRMUX_ROOT/apps/bazarr"
+    git clone --depth 1 https://github.com/morpheus65535/bazarr.git "$ARRMUX_ROOT/apps/bazarr" \
+      || { echo "ERROR: git clone de Bazarr falló." >&2; exit 1; }
+  fi
+  if [[ ! -x "$ARRMUX_ROOT/bazarr-venv/bin/python" ]]; then
+    python3 -m venv "$ARRMUX_ROOT/bazarr-venv" || { echo "ERROR: no se pudo crear venv (¿falta python3-venv?)." >&2; exit 1; }
+  fi
+  "$ARRMUX_ROOT/bazarr-venv/bin/pip" install --upgrade pip
+  "$ARRMUX_ROOT/bazarr-venv/bin/pip" install -r "$ARRMUX_ROOT/apps/bazarr/requirements.txt" \
+    || { echo "ERROR: pip install de Bazarr falló." >&2; exit 1; }
+  echo "Bazarr: instalado."
+fi
+
+echo "Todos los *arr listos."
