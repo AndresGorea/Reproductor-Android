@@ -80,10 +80,22 @@ if ! command -v qbittorrent-nox >/dev/null 2>&1; then
     die "No se pudo instalar qbittorrent-nox. Ejecuta: apt install -y qbittorrent-nox"
 fi
 
-# --- 6. Copiar configs supervisor ---
+# --- 6. Copiar configs supervisor (renderizando plantillas @@VAR@@ YAMS-style) ---
 log "Instalando configs supervisor en ${SERVICES_DIR}..."
-cp -f "${SCRIPT_DIR}/config/supervisor.conf" "${ARRMUX_ETC}/supervisor.conf"
-cp -f "${SCRIPT_DIR}"/config/services/*.conf "${SERVICES_DIR}/"
+render() { # $1=origen $2=destino: sustituye @@ARRMUX_ROOT@@ @@ARRMUX_ETC@@ @@ARRMUX_DATA@@ @@ARRMUX_LOG@@
+  sed -e "s|@@ARRMUX_ROOT@@|${ARRMUX_ROOT}|g" \
+      -e "s|@@CONF_DIR@@|${ARRMUX_ETC}|g" -e "s|@@ARRMUX_ETC@@|${ARRMUX_ETC}|g" \
+      -e "s|@@DATA_ROOT@@|${ARRMUX_DATA}|g" -e "s|@@ARRMUX_DATA@@|${ARRMUX_DATA}|g" \
+      -e "s|@@LOG_DIR@@|${ARRMUX_LOG}|g" -e "s|@@ARRMUX_LOG@@|${ARRMUX_LOG}|g" \
+      "$1" > "$2" || die "No se pudo renderizar $1 -> $2."
+  if grep -q "@@" "$2"; then
+    die "Quedaron placeholders @@...@@ sin sustituir en $2. Revisa config/$(basename "$1")."
+  fi
+}
+render "${SCRIPT_DIR}/config/supervisor.conf" "${ARRMUX_ETC}/supervisor.conf"
+for svc_conf in "${SCRIPT_DIR}"/config/services/*.conf; do
+  render "$svc_conf" "${SERVICES_DIR}/$(basename "$svc_conf")"
+done
 # Compat: algunos tutoriales miran /etc/supervisor/conf.d/
 if [ -d /etc/supervisor/conf.d ]; then
   printf '[include]\nfiles=%s/*.conf\n' "${SERVICES_DIR}" > /etc/supervisor/conf.d/arrmux.conf

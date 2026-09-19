@@ -7,14 +7,21 @@ set -euo pipefail
 : "${DATA_ROOT:=/var/lib/arrmux}"
 : "${CONF_DIR:=/etc/arrmux}"
 
-WIREPROXY_VERSION="${WIREPROXY_VERSION:-v1.1.3}"
-URL="https://github.com/windtf/wireproxy/releases/download/${WIREPROXY_VERSION}/wireproxy_linux_arm64.tar.gz"
-
+WIREPROXY_REPO="windtf/wireproxy"
+# Se resuelve la última release vía API de GitHub (releases https://github.com/windtf/wireproxy/releases).
 ARCH="$(uname -m)"
-if [[ "$ARCH" != "aarch64" && "$ARCH" != "arm64" ]]; then
-  echo "ERROR: se requiere ARM64. Detectado: $ARCH" >&2
-  exit 1
-fi
+case "${ARCH}" in
+  aarch64|arm64) ASSET_PAT="linux_arm64.tar.gz" ;;
+  x86_64) echo "ADVERTENCIA: x86_64 detectado (solo desarrollo); se descargará binario amd64." >&2
+          ASSET_PAT="linux_amd64.tar.gz" ;;
+  *) echo "ADVERTENCIA: arquitectura ${ARCH} no reconocida; se intenta linux_arm64." >&2
+     ASSET_PAT="linux_arm64.tar.gz" ;;
+esac
+echo "wireproxy: resolviendo última release de ${WIREPROXY_REPO}..."
+API_JSON="$(curl -fsSL --retry 3 --max-time 30 "https://api.github.com/repos/${WIREPROXY_REPO}/releases/latest")" \
+  || { echo "ERROR: no se pudo consultar releases de ${WIREPROXY_REPO}. Revisa red/DNS." >&2; exit 1; }
+URL="$(echo "${API_JSON}" | grep -oiE '"browser_download_url": *"[^"]*'"${ASSET_PAT}"'[^"]*"' | head -n1 | cut -d'"' -f4)"
+[[ -n "${URL:-}" ]] || { echo "ERROR: ningún asset coincide con '${ASSET_PAT}'." >&2; exit 1; }
 
 mkdir -p "$ARRMUX_ROOT/bin" "$DATA_ROOT/wireproxy" "$(dirname "$CONF_DIR/wireproxy.conf" 2>/dev/null || echo "$CONF_DIR")"
 mkdir -p "$CONF_DIR"
@@ -22,7 +29,7 @@ mkdir -p "$CONF_DIR"
 if [[ -x "$ARRMUX_ROOT/bin/wireproxy" ]]; then
   echo "wireproxy: ya instalado, se omite descarga."
 else
-  echo "wireproxy: descargando $WIREPROXY_VERSION..."
+  echo "wireproxy: descargando ${URL}..."
   TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
   if ! curl -fSL --retry 3 --max-time 120 -o "$TMP/wireproxy.tar.gz" "$URL"; then
     echo "ERROR: falló la descarga de wireproxy desde $URL" >&2

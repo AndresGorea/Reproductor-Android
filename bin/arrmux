@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # arrmux CLI — controla el stack vía supervisord. Sin Docker/systemd.
-set -uo pipefail
+set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+
+log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+log_warning() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 
 # --- Resolver rutas (absolutas, con fallback a $HOME) ---
 if [[ -f /etc/arrmux/supervisor.conf ]]; then
@@ -20,7 +24,7 @@ declare -A PORTS=( [jellyfin]=8096 [qbittorrent]=8081 [sonarr]=8989 [radarr]=787
 
 usage() {
   cat <<EOF
-${CYAN}arrmux${NC} — clon nativo YAMS (supervisord + wireproxy)
+${BLUE}arrmux${NC} — clon nativo YAMS (supervisord + wireproxy)
 Uso: arrmux <comando> [args]
   install            Ejecuta install.sh del repo (si está disponible)
   start [all|SVC]    Arranca supervisord si hace falta + servicio(s)
@@ -79,7 +83,7 @@ cmd_status() {
     echo -e "${YELLOW}supervisord no está corriendo.${NC} Usa: arrmux start"
     return 1
   fi
-  printf "${CYAN}%-12s %-9s %-8s %-10s %s${NC}\n" "SERVICIO" "ESTADO" "PID" "MEM" "URL"
+  printf "${BLUE}%-12s %-9s %-8s %-10s %s${NC}\n" "SERVICIO" "ESTADO" "PID" "MEM" "URL"
   local line svc state pid
   while IFS= read -r line; do
     svc="$(awk '{print $1}' <<<"$line")"
@@ -105,23 +109,31 @@ cmd_logs() {
     valid_svc "$t"
     tail -f "$LOG_DIR/$t.log"
   else
-    echo -e "${CYAN}Logs en $LOG_DIR:${NC}"; ls -1 "$LOG_DIR"/*.log 2>/dev/null || echo "(sin logs todavía)"
+    echo -e "${BLUE}Logs en $LOG_DIR:${NC}"; ls -1 "$LOG_DIR"/*.log 2>/dev/null || echo "(sin logs todavía)"
     tail -f "$LOG_DIR"/*.log
   fi
 }
 
 cmd_vpn_check() {
   local direct tun
+  # 1. ¿Escucha algo en 127.0.0.1:1080?
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w3 127.0.0.1 1080 2>/dev/null || { log_error "FAIL: nada escucha en 127.0.0.1:1080. Arranca: arrmux start wireproxy"; return 1; }
+  else
+    (echo > /dev/tcp/127.0.0.1/1080) 2>/dev/null || { log_error "FAIL: nada escucha en 127.0.0.1:1080. Arranca: arrmux start wireproxy"; return 1; }
+  fi
   direct="$(curl -s --max-time 10 https://api.ipify.org || echo "FALLO")"
-  tun="$(curl -s --max-time 10 --socks5 127.0.0.1:1080 https://api.ipify.org || echo "FALLO")"
+  tun="$(curl -s --max-time 10 -x socks5h://127.0.0.1:1080 https://api.ipify.org || echo "FALLO")"
   echo -e "IP directa:          ${YELLOW}$direct${NC}"
   echo -e "IP vía SOCKS5:1080: ${GREEN}$tun${NC}"
   if [[ "$direct" != "FALLO" && "$tun" != "FALLO" && "$direct" != "$tun" ]]; then
-    echo -e "${GREEN}OK: el túnel cambia tu IP pública.${NC}"
+    log_success "OK: túnel activo. Directa=$direct VPN=$tun"
   elif [[ "$tun" == "FALLO" ]]; then
-    echo -e "${RED}AVISO: wireproxy no responde en 127.0.0.1:1080. Revisa $CONF_DIR/wireproxy.conf y 'arrmux logs wireproxy'.${NC}"
+    log_error "FAIL: wireproxy no responde en 127.0.0.1:1080. Revisa $CONF_DIR/wireproxy.conf y 'arrmux logs wireproxy'."
+    return 1
   else
-    echo -e "${YELLOW}AVISO: ambas IPs coinciden — el tráfico podría NO estar tunelado.${NC}"
+    log_error "FAIL: ambas IPs coinciden ($direct) — el tráfico podría NO estar tunelado."
+    return 1
   fi
 }
 
@@ -133,5 +145,7 @@ case "${1:-}" in
   status)  cmd_status ;;
   logs)    shift; cmd_logs "${1:-}" ;;
   vpn-check) cmd_vpn_check ;;
-  *) usage; exit "${1:+1}" ;;
+  --help|-h|help) usage; exit 0 ;;
+  "") usage; exit 1 ;;
+  *) log_error "Comando desconocido: $1"; usage; exit 1 ;;
 esac

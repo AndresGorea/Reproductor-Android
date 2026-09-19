@@ -7,10 +7,11 @@ set -euo pipefail
 : "${DATA_ROOT:=/var/lib/arrmux}"
 
 ARCH="$(uname -m)"
-if [[ "$ARCH" != "aarch64" && "$ARCH" != "arm64" ]]; then
-  echo "ERROR: se requiere ARM64 (aarch64). Detectado: $ARCH" >&2
-  exit 1
-fi
+case "${ARCH}" in
+  aarch64|arm64) echo "Arquitectura ${ARCH} (ARM64) — objetivo soportado." ;;
+  *) echo "ADVERTENCIA: arquitectura ${ARCH}; se esperaba aarch64 (Snapdragon 8 Gen 2)." >&2
+     echo "Se continúa igualmente (útil en x86_64 para desarrollo)." >&2 ;;
+esac
 
 # Dependencias de runtime típicas en Ubuntu 22.04 (aviso, no instalación forzada).
 for lib in libicu sqlite3 libssl3 ca-certificates; do
