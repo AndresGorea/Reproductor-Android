@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# arrmux CLI — controla el stack vía supervisord. Sin Docker/systemd.
+set -uo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+# --- Resolver rutas (absolutas, con fallback a $HOME) ---
+if [[ -f /etc/arrmux/supervisor.conf ]]; then
+  CONF_DIR="/etc/arrmux"; DATA_ROOT="/var/lib/arrmux"; LOG_DIR="/var/log/arrmux"; ARRMUX_ROOT="/opt/arrmux"
+else
+  CONF_DIR="$HOME/.arrmux/etc"; DATA_ROOT="$HOME/.arrmux/data"; LOG_DIR="$HOME/.arrmux/log"; ARRMUX_ROOT="$HOME/.arrmux/opt"
+fi
+SUP_CONF="$CONF_DIR/supervisor.conf"
+SOCK="$DATA_ROOT/supervisor.sock"
+
+SERVICES="wireproxy jellyfin qbittorrent sonarr radarr prowlarr bazarr"
+
+# Puertos y URLs (fijos del stack)
+declare -A PORTS=( [jellyfin]=8096 [qbittorrent]=8081 [sonarr]=8989 [radarr]=7878 [prowlarr]=9696 [bazarr]=6767 [wireproxy]=1080 )
+
+usage() {
+  cat <<EOF
+${CYAN}arrmux${NC} — clon nativo YAMS (supervisord + wireproxy)
+Uso: arrmux <comando> [args]
+  install            Ejecuta install.sh del repo (si está disponible)
+  start [all|SVC]    Arranca supervisord si hace falta + servicio(s)
+  stop [all|SVC]     Para servicio(s) (all = todos, deja supervisord)
+  restart [all|SVC]  Reinicia servicio(s)
+  status             Tabla RUNNING/STOPPED PID MEM URL
+  logs [SVC]         tail -f del log (todos si se omite SVC)
+  vpn-check          Compara IP directa vs IP vía SOCKS5 127.0.0.1:1080
+Servicios: $SERVICES
+EOF
+}
+
+need_supervisor() {
+  if [[ ! -f "$SUP_CONF" ]]; then echo -e "${RED}Falta $SUP_CONF. Ejecuta install.sh primero.${NC}" >&2; exit 1; fi
+}
+
+# supervisorctl contra el socket (ruta absoluta, nunca /sdcard)
+sctl() {
+  supervisorctl -c "$SUP_CONF" "$@"
+}
+
+ensure_supervisord() {
+  if sctl status >/dev/null 2>&1; then return 0; fi
+  echo -e "${YELLOW}Arrancando supervisord...${NC}"
+  supervisord -c "$SUP_CONF"
+  sleep 2
+  sctl status >/dev/null 2>&1 || { echo -e "${RED}supervisord no responde (revisa $LOG_DIR/supervisord.log)${NC}" >&2; exit 1; }
+}
+
+valid_svc() {
+  local s="$1"
+  [[ " $SERVICES " == *" $s "* ]] || { echo -e "${RED}Servicio desconocido: $s${NC}" >&2; echo "Válidos: $SERVICES" >&2; exit 1; }
+}
+
+cmd_start() {
+  need_supervisor; ensure_supervisord
+  local t="${1:-all}"
+  if [[ "$t" == "all" ]]; then sctl start all; else valid_svc "$t"; sctl start "$t"; fi
+}
+
+cmd_stop() {
+  need_supervisor
+  local t="${1:-all}"
+  if [[ "$t" == "all" ]]; then sctl stop all; else valid_svc "$t"; sctl stop "$t"; fi
+}
+
+cmd_restart() {
+  need_supervisor; ensure_supervisord
+  local t="${1:-all}"
+  if [[ "$t" == "all" ]]; then sctl restart all; else valid_svc "$t"; sctl restart "$t"; fi
+}
+
+cmd_status() {
+  need_supervisor
+  if ! sctl status >/dev/null 2>&1; then
+    echo -e "${YELLOW}supervisord no está corriendo.${NC} Usa: arrmux start"
+    return 1
+  fi
+  printf "${CYAN}%-12s %-9s %-8s %-10s %s${NC}\n" "SERVICIO" "ESTADO" "PID" "MEM" "URL"
+  local line svc state pid
+  while IFS= read -r line; do
+    svc="$(awk '{print $1}' <<<"$line")"
+    state="$(awk '{print $2}' <<<"$line")"
+    pid="$(grep -oP 'pid \K[0-9]+' <<<"$line" || echo "-")"
+    [[ "$pid" == "" ]] && pid="-"
+    local mem="-" url="-"
+    if [[ "$pid" != "-" ]]; then
+      mem="$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.0fM", $1/1024}' || echo "-")"
+    fi
+    local port="${PORTS[$svc]:-}"
+    [[ -n "$port" ]] && url="http://127.0.0.1:$port"
+    [[ "$svc" == "wireproxy" ]] && url="socks5://127.0.0.1:1080"
+    if [[ "$state" == "RUNNING" ]]; then state="${GREEN}RUNNING${NC}"; else state="${RED}${state}${NC}"; fi
+    # shellcheck disable=SC2059
+    printf "%-12s ${state} %-8s %-10s %s\n" "$svc" "$pid" "$mem" "$url"
+  done < <(sctl status)
+}
+
+cmd_logs() {
+  local t="${1:-}"
+  if [[ -n "$t" ]]; then
+    valid_svc "$t"
+    tail -f "$LOG_DIR/$t.log"
+  else
+    echo -e "${CYAN}Logs en $LOG_DIR:${NC}"; ls -1 "$LOG_DIR"/*.log 2>/dev/null || echo "(sin logs todavía)"
+    tail -f "$LOG_DIR"/*.log
+  fi
+}
+
+cmd_vpn_check() {
+  local direct tun
+  direct="$(curl -s --max-time 10 https://api.ipify.org || echo "FALLO")"
+  tun="$(curl -s --max-time 10 --socks5 127.0.0.1:1080 https://api.ipify.org || echo "FALLO")"
+  echo -e "IP directa:          ${YELLOW}$direct${NC}"
+  echo -e "IP vía SOCKS5:1080: ${GREEN}$tun${NC}"
+  if [[ "$direct" != "FALLO" && "$tun" != "FALLO" && "$direct" != "$tun" ]]; then
+    echo -e "${GREEN}OK: el túnel cambia tu IP pública.${NC}"
+  elif [[ "$tun" == "FALLO" ]]; then
+    echo -e "${RED}AVISO: wireproxy no responde en 127.0.0.1:1080. Revisa $CONF_DIR/wireproxy.conf y 'arrmux logs wireproxy'.${NC}"
+  else
+    echo -e "${YELLOW}AVISO: ambas IPs coinciden — el tráfico podría NO estar tunelado.${NC}"
+  fi
+}
+
+case "${1:-}" in
+  install) REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || echo .)"; bash "$REPO/install.sh" ;;
+  start)   shift; cmd_start "${1:-all}" ;;
+  stop)    shift; cmd_stop "${1:-all}" ;;
+  restart) shift; cmd_restart "${1:-all}" ;;
+  status)  cmd_status ;;
+  logs)    shift; cmd_logs "${1:-}" ;;
+  vpn-check) cmd_vpn_check ;;
+  *) usage; exit "${1:+1}" ;;
+esac
