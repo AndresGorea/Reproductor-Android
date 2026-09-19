@@ -17,15 +17,23 @@ fi
 SUP_CONF="$CONF_DIR/supervisor.conf"
 SOCK="$DATA_ROOT/supervisor.sock"
 
-SERVICES="wireproxy jellyfin qbittorrent sonarr radarr prowlarr bazarr"
+# Perfil simple por defecto: wireproxy + jellyfin + qbittorrent.
+# Perfil full (--full): añade *arr si sus conf están instaladas.
+CORE_SERVICES="wireproxy jellyfin qbittorrent"
+FULL_SERVICES="wireproxy jellyfin qbittorrent sonarr radarr prowlarr bazarr"
+SERVICES="$CORE_SERVICES"
+if [[ "${1:-}" == "--full" ]]; then
+  SERVICES="$FULL_SERVICES"
+  shift
+fi
 
-# Puertos y URLs (fijos del stack)
+# Puertos y URLs (core + full)
 declare -A PORTS=( [jellyfin]=8096 [qbittorrent]=8081 [sonarr]=8989 [radarr]=7878 [prowlarr]=9696 [bazarr]=6767 [wireproxy]=1080 )
 
 usage() {
   cat <<EOF
-${BLUE}arrmux${NC} — clon nativo YAMS (supervisord + wireproxy)
-Uso: arrmux <comando> [args]
+${BLUE}arrmux${NC} — Jellyfin + qBittorrent + VPN (supervisord + wireproxy)
+Uso: arrmux [--full] <comando> [args]
   install            Ejecuta install.sh del repo (si está disponible)
   start [all|SVC]    Arranca supervisord si hace falta + servicio(s)
   stop [all|SVC]     Para servicio(s) (all = todos, deja supervisord)
@@ -33,7 +41,8 @@ Uso: arrmux <comando> [args]
   status             Tabla RUNNING/STOPPED PID MEM URL
   logs [SVC]         tail -f del log (todos si se omite SVC)
   vpn-check          Compara IP directa vs IP vía SOCKS5 127.0.0.1:1080
-Servicios: $SERVICES
+Servicios (simple): $CORE_SERVICES
+Con --full: $FULL_SERVICES  (requiere ./install.sh --full)
 EOF
 }
 
@@ -56,7 +65,11 @@ ensure_supervisord() {
 
 valid_svc() {
   local s="$1"
-  [[ " $SERVICES " == *" $s "* ]] || { echo -e "${RED}Servicio desconocido: $s${NC}" >&2; echo "Válidos: $SERVICES" >&2; exit 1; }
+  [[ " $FULL_SERVICES " == *" $s "* ]] || { echo -e "${RED}Servicio desconocido: $s${NC}" >&2; echo "Válidos: $FULL_SERVICES" >&2; exit 1; }
+  if [[ " $CORE_SERVICES " != *" $s "* && ! -f "$CONF_DIR/services/$s.conf" ]]; then
+    echo -e "${RED}$s es perfil full y no está instalado.${NC} Re-ejecuta: ./install.sh --full" >&2
+    exit 1
+  fi
 }
 
 cmd_start() {
@@ -142,7 +155,7 @@ cmd_vpn_check() {
 }
 
 case "${1:-}" in
-  install) REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || echo .)"; bash "$REPO/install.sh" ;;
+  install) shift; REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || echo .)"; bash "$REPO/install.sh" "$@" ;;
   start)   shift; cmd_start "${1:-all}" ;;
   stop)    shift; cmd_stop "${1:-all}" ;;
   restart) shift; cmd_restart "${1:-all}" ;;

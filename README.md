@@ -7,17 +7,33 @@ gestor de procesos y `wireproxy` (userspace) como "VPN" SOCKS5 en
 
 ## Qué es
 
-Un instalador + CLI que descarga y supervisa:
+Un instalador + CLI que descarga y supervisa (modo simple por defecto):
 
 | Servicio   | Puerto | URL                    |
 |------------|--------|------------------------|
+| wireproxy  | 1080   | socks5://127.0.0.1:1080|
 | Jellyfin   | 8096   | http://127.0.0.1:8096  |
 | qBittorrent| 8081   | http://127.0.0.1:8081  |
-| Sonarr     | 8989   | http://127.0.0.1:8989  |
-| Radarr     | 7878   | http://127.0.0.1:7878  |
-| Prowlarr   | 9696   | http://127.0.0.1:9696  |
-| Bazarr     | 6767   | http://127.0.0.1:6767  |
-| wireproxy  | 1080   | socks5://127.0.0.1:1080|
+
+Modo full (`./install.sh --full`) añade: Sonarr 8989, Radarr 7878,
+Prowlarr 9696, Bazarr 6767.
+
+## Modo simple (por defecto)
+
+```bash
+git clone <este-repo> && cd reproductor
+chmod +x install.sh bin/arrmux scripts/*.sh
+./install.sh                    # solo storage + wireproxy + qbittorrent + jellyfin
+# 1. Configura WireGuard: edita /etc/arrmux/wireproxy.conf
+#    (o $HOME/.arrmux/etc/wireproxy.conf) con tus datos [Interface]/[Peer].
+arrmux start wireproxy
+arrmux vpn-check                 # la IP vía SOCKS5 debe diferir de la directa
+arrmux start all                 # arranca jellyfin + qbittorrent
+arrmux status
+```
+
+Nota: modo full con `--full` incluye *arr
+(`./install.sh --full`; el CLI los gestiona con `arrmux --full status/...`).
 
 ## Diferencias vs YAMS (rogsme/yams)
 
@@ -110,33 +126,21 @@ arrmux vpn-check              # IP directa vs IP vía SOCKS5
   Verifica siempre con `vpn-check` antes de descargar.
 - `ERROR ... bajo /sdcard` → mueve `DATA_ROOT` a almacenamiento interno.
 
-## ⚠️ VIABILIDAD HONESTA (léeme)
+## ⚠️ VIABILIDAD HONESTA (resumen)
 
-Sin interfaz TUN real **no hay kill-switch de verdad**: si wireproxy se cae,
-qBittorrent *intentará* seguir usando un proxy muerto (falla cerrado en la
-práctica con `ProxyPeerConnections=true`, pero no es una garantía a nivel de
-firewall como en Gluetun; verifícalo tú mismo parando wireproxy y observando).
-
-- **SOCKS5 ≠ cifrado total**: solo el tráfico TCP configurado pasa por el
-  túnel; el resto de la máquina sale directo.
-- **DHT/UDP limitado**: el tráfico UDP (DHT, PeX, uTP) no atraviesa SOCKS5;
-  por eso este proyecto lo **desactiva** (`DHT/PeX/LSD=false`, `BTProtocol=TCP`).
-  Menos fuentes = descargas potencialmente más lentas.
-- **Transcode por software lento**: sin aceleración HW en PRoot, Jellyfin
-  transcodificando 4K puede ir a tirones; prefiere direct-play.
-- **Doze/batería mata procesos**: Android puede suspender o matar PRoot en
-  segundo plano; excluye Termux del ahorro de batería y acepta cortes.
-- **FUSE corrompe sqlite**: nunca pongas configs/DBs en `/sdcard`
-  (el instalador aborta si lo intentas); solo `media/` vive ahí.
-- **Sin port-forward**: la mayoría de VPN no redirigen puertos vía WireGuard
-  genérico; cuenta con ratio de subida pobre (sin conexiones entrantes).
-- **.NET necesita libicu**: sin `libicu70`, Sonarr/Radarr/Prowlarr mueren al
-  arrancar con errores de globalización.
+Sin TUN real **no hay kill-switch de verdad** (si wireproxy cae, qBittorrent
+usa un proxy muerto: falla cerrado en la práctica, pero sin garantía de
+firewall — verifícalo parando wireproxy). Además: **SOCKS5 ≠ cifrado total**;
+**DHT/UDP desactivado** (menos fuentes); **transcode SW lento** (direct-play);
+**Doze/batería** puede matar PRoot; **FUSE corrompe sqlite** (DBs nunca en
+`/sdcard`, el instalador aborta); **sin port-forward**; **.NET necesita
+libicu** (modo full).
 
 ## Estructura
 
 ```text
-install.sh  bin/arrmux  config/supervisor.conf  config/services/*.conf
+install.sh  bin/arrmux  config/supervisor.conf  config/services/{wireproxy,jellyfin,qbittorrent}.conf
+config/services/optional/{sonarr,radarr,prowlarr,bazarr}.conf  (perfil full)
 scripts/install_arr.sh  scripts/setup_wireproxy.sh
 scripts/setup_storage.sh  scripts/setup_qbittorrent.sh
 ```

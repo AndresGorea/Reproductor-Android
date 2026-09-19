@@ -20,7 +20,16 @@ die()  { echo "[install] ERROR: $*" >&2; exit 1; }
   warn "Sin root: usando fallback \$HOME/.arrmux (ROOT=${ARRMUX_ROOT} ETC=${ARRMUX_ETC})."
 }
 # --force / ARRMUX_FORCE=1: permite tests en arch != aarch64 (se propaga a sub-scripts).
-if [[ "${1:-}" == "--force" ]]; then export ARRMUX_FORCE=1; fi
+# --full: perfil completo con *arr (Sonarr/Radarr/Prowlarr/Bazarr). Por defecto MODO SIMPLE.
+# SKIP_ARR=1 (default) omite *arr; SKIP_ARR=0 equivale a --full.
+FULL=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) export ARRMUX_FORCE=1 ;;
+    --full)  FULL=1 ;;
+  esac
+done
+[[ "${SKIP_ARR:-1}" == "0" ]] && FULL=1
 IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 
 # --- 1. Dependencias ---
@@ -54,8 +63,12 @@ export ARRMUX_ROOT ARRMUX_DATA ARRMUX_LOG
 export DATA_ROOT="$ARRMUX_DATA" LOG_DIR="$ARRMUX_LOG" CONF_DIR="$ARRMUX_ETC"
 log "== storage =="
 bash "${SCRIPT_DIR}/scripts/setup_storage.sh"
-log "== Servarr + Bazarr =="
-bash "${SCRIPT_DIR}/scripts/install_arr.sh" ${ARRMUX_FORCE:+--force}
+if [ "$FULL" -eq 1 ]; then
+  log "== Servarr + Bazarr (perfil full) =="
+  bash "${SCRIPT_DIR}/scripts/install_arr.sh" ${ARRMUX_FORCE:+--force}
+else
+  log "== Servarr + Bazarr: omitido (modo simple; usa --full para *arr) =="
+fi
 log "== wireproxy =="
 bash "${SCRIPT_DIR}/scripts/setup_wireproxy.sh" ${ARRMUX_FORCE:+--force}
 log "== qbittorrent (proxy forzado) =="
@@ -113,9 +126,22 @@ render() { # $1=origen $2=destino: sustituye @@ARRMUX_ROOT@@ @@ARRMUX_ETC@@ @@AR
   fi
 }
 render "${SCRIPT_DIR}/config/supervisor.conf" "${ARRMUX_ETC}/supervisor.conf"
-for svc_conf in "${SCRIPT_DIR}"/config/services/*.conf; do
-  render "$svc_conf" "${SERVICES_DIR}/$(basename "$svc_conf")"
+# Core (modo simple): wireproxy + jellyfin + qbittorrent, siempre.
+for svc in wireproxy jellyfin qbittorrent; do
+  render "${SCRIPT_DIR}/config/services/${svc}.conf" "${SERVICES_DIR}/${svc}.conf"
 done
+# Perfil full: *arr de config/services/optional/ (nunca se borran, solo se activan con --full).
+if [ "$FULL" -eq 1 ]; then
+  for svc_conf in "${SCRIPT_DIR}"/config/services/optional/*.conf; do
+    render "$svc_conf" "${SERVICES_DIR}/$(basename "$svc_conf")"
+  done
+  log "Perfil full: *arr instalados."
+else
+  # Limpia restos de un --full anterior para que supervisord no los gestione.
+  rm -f "${SERVICES_DIR}"/sonarr.conf "${SERVICES_DIR}"/radarr.conf \
+        "${SERVICES_DIR}"/prowlarr.conf "${SERVICES_DIR}"/bazarr.conf
+  log "Modo simple: solo wireproxy+jellyfin+qbittorrent (usa --full para *arr)."
+fi
 # Compat: algunos tutoriales miran /etc/supervisor/conf.d/ (solo root).
 if [ "$IS_ROOT" -eq 1 ] && [ -d /etc/supervisor/conf.d ]; then
   printf '[include]\nfiles=%s/*.conf\n' "${SERVICES_DIR}" > /etc/supervisor/conf.d/arrmux.conf
@@ -143,14 +169,23 @@ IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<EOF
 [install] ============================================
 [install]  arrmux instalado / reparado correctamente
+[install]  Perfil: $([ "$FULL" -eq 1 ] && echo "FULL (+*arr)" || echo "SIMPLE")
 [install] ============================================
+  wireproxy     socks5h://127.0.0.1:1080
   Jellyfin      http://${IP}:8096
   qBittorrent   http://${IP}:8081
+EOF
+if [ "$FULL" -eq 1 ]; then
+  cat <<EOF
   Sonarr        http://${IP}:8989
   Radarr        http://${IP}:7878
   Prowlarr      http://${IP}:9696
   Bazarr        http://${IP}:6767
-  wireproxy     socks5h://127.0.0.1:1080
+EOF
+else
+  echo "  (*arr omitidos; re-ejecuta con ./install.sh --full para activarlos)"
+fi
+cat <<EOF
 
   1. Edita ${ARRMUX_ETC}/wireproxy.conf con tu .conf WireGuard.
   2. Arranca: arrmux start all && arrmux status
